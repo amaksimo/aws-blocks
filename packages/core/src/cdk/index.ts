@@ -25,7 +25,7 @@ export {
 export { DEFAULT_NODE_RUNTIME } from './node-version.js';
 export { blocksNodejsBundling } from './bundling.js';
 export { SandboxDisableDeletionProtection } from './mixins.js';
-export { registerConfig, finalizeConfigRegistry } from './config-registry.js';
+export { registerConfig, finalizeConfigRegistry, getConfigLocation } from './config-registry.js';
 export {
   type BlocksDefaults,
   BlocksPresets,

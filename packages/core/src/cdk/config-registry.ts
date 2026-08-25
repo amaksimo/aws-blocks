@@ -9,9 +9,14 @@ import type { Construct } from 'constructs';
 
 const REGISTRY_KEY = Symbol.for('BLOCKS_CONFIG_REGISTRY');
 
+/** The object key of the config JSON under {@link getConfigLocation}'s bucket. */
+const CONFIG_KEY = 'blocks-config.json';
+
 interface ConfigRegistryState {
 	entries: Map<string, unknown>;
 	finalized: boolean;
+	/** The shared config bucket, created once per stack by {@link getConfigLocation}. */
+	bucket?: s3.Bucket;
 }
 
 /**
@@ -46,6 +51,46 @@ export function registerConfig(scope: Construct, key: string, value: unknown): v
 }
 
 /**
+ * Ensure the shared config bucket exists and return where the config JSON lives
+ * (`{ bucketName, key }`). The bucket is created **once per stack** (memoized on
+ * the registry) and this is idempotent — the first caller creates it, later
+ * callers get the same bucket regardless of order.
+ *
+ * Any compute that loads config at runtime (`loadConfigToProcessEnv()`) injects
+ * these two values as `BLOCKS_CONFIG_BUCKET` / `BLOCKS_CONFIG_KEY`. The Lambda
+ * handler gets them from {@link finalizeConfigRegistry}; other compute that runs
+ * as the shared execution role (e.g. the Agent BB's AgentCore Runtime) calls this
+ * at construction to inject them too, so it loads the same app config the handler
+ * does. IAM is not granted here — `finalizeConfigRegistry` grants `s3:GetObject`
+ * to the shared execution role, which such compute inherits.
+ *
+ * @param scope - Any construct in the stack; the bucket is created under the stack.
+ */
+export function getConfigLocation(scope: Construct): { bucketName: string; key: string } {
+	const stack = cdk.Stack.of(scope);
+	const registry = getRegistry(stack);
+	if (!registry.bucket) {
+		// Create under the owning BlocksStack/BlocksBackend (the same construct finalize historically
+		// used), so the bucket's logical ID is stable regardless of which caller creates it first — a
+		// BlocksBackend embedded in a customer stack keeps `Blocks/BlocksConfigBucket` (no replacement),
+		// rather than moving to the stack root when a co-located BB (e.g. the AgentCore Runtime, a deep
+		// construct) is the first to call getConfigLocation. Fall back to the stack when no owner is
+		// registered (isolated unit tests). The registry stays keyed per-stack (see getRegistry).
+		const owner = ((globalThis as any).CURRENT_BLOCKS_STACK as Construct | undefined) ?? stack;
+		registry.bucket = new s3.Bucket(owner, 'BlocksConfigBucket', {
+			removalPolicy: cdk.RemovalPolicy.DESTROY,
+			autoDeleteObjects: true,
+			encryption: s3.BucketEncryption.S3_MANAGED,
+			blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+			lifecycleRules: [
+				{ noncurrentVersionExpiration: cdk.Duration.days(1) },
+			],
+		});
+	}
+	return { bucketName: registry.bucket.bucketName, key: CONFIG_KEY };
+}
+
+/**
  * Finalize the config registry: create an S3 bucket, upload the config JSON,
  * set env vars on the handler, and grant read access.
  *
@@ -65,42 +110,37 @@ export function finalizeConfigRegistry(
 	if (registry.finalized) return;
 	registry.finalized = true;
 
-	if (registry.entries.size === 0) return;
+	// Nothing to do only if no config was registered AND no bucket was created (via
+	// getConfigLocation). If a co-located BB created the bucket, still upload (even an empty {}) and
+	// wire the handler so that compute's loadConfigToProcessEnv() resolves instead of 404-ing forever.
+	if (registry.entries.size === 0 && !registry.bucket) return;
 
-	const configBucket = new s3.Bucket(scope, 'BlocksConfigBucket', {
-		removalPolicy: cdk.RemovalPolicy.DESTROY,
-		autoDeleteObjects: true,
-		encryption: s3.BucketEncryption.S3_MANAGED,
-		blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
-		lifecycleRules: [
-			{ noncurrentVersionExpiration: cdk.Duration.days(1) },
-		],
-	});
-
-	const configKey = 'blocks-config.json';
+	// Ensure the bucket exists (a BB may already have created it via getConfigLocation).
+	const { bucketName, key } = getConfigLocation(scope);
+	const configBucket = registry.bucket!;
 
 	const configObject = cdk.Lazy.any({
 		produce: () => Object.fromEntries(registry.entries),
 	});
 
-	const deployment = new s3deploy.BucketDeployment(scope, 'BlocksConfigDeployment', {
-		sources: [s3deploy.Source.jsonData(configKey, configObject)],
+	new s3deploy.BucketDeployment(scope, 'BlocksConfigDeployment', {
+		sources: [s3deploy.Source.jsonData(key, configObject)],
 		destinationBucket: configBucket,
 		prune: false,
 	});
 
 	(handler as cdk.aws_lambda.Function).addEnvironment(
 		'BLOCKS_CONFIG_BUCKET',
-		configBucket.bucketName,
+		bucketName,
 	);
 	(handler as cdk.aws_lambda.Function).addEnvironment(
 		'BLOCKS_CONFIG_KEY',
-		configKey,
+		key,
 	);
 
 	// Scope IAM grant to the specific config key
 	(handler as cdk.aws_lambda.Function).addToRolePolicy(new iam.PolicyStatement({
 		actions: ['s3:GetObject'],
-		resources: [`${configBucket.bucketArn}/${configKey}`],
+		resources: [`${configBucket.bucketArn}/${key}`],
 	}));
 }
