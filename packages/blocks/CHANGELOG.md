@@ -1,5 +1,101 @@
 # @aws-blocks/blocks
 
+## 0.4.0
+
+### Minor Changes
+
+- 08ab129: Add `pointInTimeRecovery: boolean | { retentionDays: number }` to `BlocksDefaults` (and to `BlocksPresets`: `true` in `production`, `false` in `sandbox`).
+  
+  This extends the stack-wide infrastructure-defaults posture with the continuous-backup knob, so a Building Block whose service supports it (DynamoDB Point-in-Time Recovery) can resolve its default from `scope.defaults.pointInTimeRecovery` — read independently, the same way as `removalPolicy` and `deletionProtection`. `true` enables backups with the service default window, `false` disables them, and `{ retentionDays: n }` pins the window (the block validates `n` against its service's range) — on/off and window are one field since a window only means anything when backups are on. Blocks whose service has no equivalent simply ignore it. `bb-distributed-table` is the first consumer.
+  
+  > The property **name** (`pointInTimeRecovery`) and its `{ retentionDays }` shape are a public `@aws-blocks/core/cdk` surface addition and want API-BR sign-off before release.
+
+### Patch Changes
+
+- 5798492: feat(bb-async-job): batch SQS messages by default, with a configurable batching window
+  
+  `AsyncJob` triggered its Lambda with `batchSize: 1`, so every queued job cost a
+  full invocation. The default is now `batchSize: 10` with a new
+  `maxBatchingWindowSeconds` option (0–300, default 5) that trades latency for
+  fuller batches. SQS partial batch failure reporting is always enabled, so only
+  the failed records of a batch are redelivered.
+  
+  Both options are now range-checked in the `AsyncJob` constructor, so an
+  out-of-range value fails fast at synth time with `InvalidOptionException` naming
+  the option instead of surfacing as an opaque CloudFormation error mid-deploy:
+  `batchSize` must be 1–10 without a batching window (1–10000 with one), and
+  `maxBatchingWindowSeconds` must be 0–300.
+  
+  Retry semantics are unchanged. SQS tracks `ApproximateReceiveCount` per message
+  and partial batch responses redeliver only failed records, so `maxRetries` still
+  means "attempts for this message" and the DLQ `maxReceiveCount` keeps its
+  meaning at any batch size.
+  
+  This is a `patch` bump. Every package here is pre-1.0, where a `minor` bump is
+  this repo's signal for a breaking change; this change is not breaking — the new
+  default is a behavior change with an opt-out (`batchSize: 1` /
+  `maxBatchingWindowSeconds: 0`), and both options are new and optional. The
+  umbrella `@aws-blocks/blocks` gets the same bump because it re-exports
+  `AsyncJob` and `AsyncJobOptions`.
+  
+  `@aws-blocks/core/cdk` now exports `SHARED_HANDLER_TIMEOUT_SECONDS`, the shared
+  handler Lambda's timeout, so resources that must size their own timeouts against
+  it stop re-hardcoding `900`.
+  
+  The main queue's visibility timeout is now `SHARED_HANDLER_TIMEOUT_SECONDS + maxBatchingWindowSeconds`
+  seconds instead of a flat `900`. A message becomes invisible when the poller
+  receives it, before the batching window elapses and before the handler runs, so
+  a flat 900s let SQS redeliver a message whose invocation was still running.
+  
+  `bb-agent` opts out of the new defaults with `batchSize: 1` and
+  `maxBatchingWindowSeconds: 0`. It submits an internal job per interactive agent
+  turn (plus a second on HITL resume) and the caller is blocked on that job
+  starting, so a batching window would add up to 5s of latency to a human-facing
+  path; `batchSize: 1` also keeps one failing turn from sharing a batch with
+  others, which matters because the handler is not idempotent. Both the runtime
+  and CDK construction sites set the same options so they synthesize an identical
+  event source mapping.
+- 27346f3: Make AuthOIDC `requireAuth()` throw `ApiError(401, NotAuthenticatedException)` so the documented `handle401()` 401-redirect pattern works for a signed-out protected call.
+  
+  Previously `requireAuth()` threw a bare `Error` with no `status`. Over the JSON-RPC boundary `errorResponseFromCatch` serializes a non-`ApiError` as code `500`, so the client received an `ApiError` with `status === 500`. The README's `if (handle401(e, provider)) return;` helper only acts on `err instanceof ApiError && err.status === 401`, so it never matched and the app never redirected to sign-in — the error just surfaced. This aligns AuthOIDC with AuthCognito, whose `requireAuth()` already throws `ApiError(401, …)`. The error name is preserved, so existing `isBlocksError(e, AuthOIDCErrors.NotAuthenticated)` checks are unaffected.
+- 5bfae0a: Reject oversized JSON-RPC request bodies at the shared parser. `parseRpcRequest` now caps the body at 10 MiB (`MAX_RPC_BODY_BYTES`, the same limit API Gateway enforces in production) and returns a `413` error named `PayloadTooLarge` before parsing or dispatch. In production API Gateway rejects an oversized body at the edge before the Lambda runs; enforcing the same limit at the parser means the local dev server rejects the same body instead of buffering it and wedging the local database (e.g. PGlite). Because both the Lambda handler and the dev server route through this one parser, the cap lives in a single place, and `decodeRpcResponse` surfaces it client-side as `ApiError.status === 413`.
+- 0ac3879: `sandbox` / `deploy`: fail fast with an actionable message when AWS credentials are missing or expired.
+  
+  Both commands previously spent ~10 seconds synthesizing the CDK app before the first AWS call, so an unconfigured or expired credential surfaced only afterwards — as an opaque CDK/CloudFormation error that didn't name the real cause. `startSandbox` and `deploy` now run a bounded STS `GetCallerIdentity` check up front and, on a real credential error (missing/expired/invalid), exit immediately with guidance (`aws configure` / `aws sso login`, `AWS_PROFILE`, or `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`) instead of wasting the synth.
+  
+  The check is deliberately conservative: it only blocks on a genuine credential error (surfacing the SDK error *name*, never the raw message, which can embed an ARN/account id); a network or service error warns and lets the deploy proceed; and it skips (with a warning) when no region is set in `AWS_REGION` / `AWS_DEFAULT_REGION`, rather than guessing a region in the wrong partition (GovCloud/China). The scaffolded `sandbox` template entrypoint now `.catch`es and exits cleanly, matching `deploy`, so the guidance prints without an unhandled-rejection stack trace.
+- Updated dependencies [5798492]
+- Updated dependencies [08ab129]
+- Updated dependencies [309a236]
+- Updated dependencies [08ab129]
+- Updated dependencies [27346f3]
+- Updated dependencies [5bfae0a]
+- Updated dependencies [0ac3879]
+- Updated dependencies [e4dac4a]
+- Updated dependencies [9bd5b3e]
+  - @aws-blocks/core@0.3.0
+  - @aws-blocks/bb-async-job@0.1.5
+  - @aws-blocks/bb-agent@0.3.5
+  - @aws-blocks/bb-distributed-table@0.1.6
+  - @aws-blocks/bb-kv-store@0.1.7
+  - @aws-blocks/bb-file-bucket@0.1.5
+  - @aws-blocks/bb-data@0.2.6
+  - @aws-blocks/bb-app-setting@0.1.5
+  - @aws-blocks/bb-knowledge-base@0.2.2
+  - @aws-blocks/bb-email-client@0.1.5
+  - @aws-blocks/bb-auth-cognito@0.1.8
+  - @aws-blocks/bb-auth-oidc@0.1.9
+  - @aws-blocks/bb-distributed-data@0.1.7
+  - @aws-blocks/auth-common@0.1.6
+  - @aws-blocks/bb-auth-basic@0.1.7
+  - @aws-blocks/bb-cron-job@0.1.5
+  - @aws-blocks/bb-dashboard@0.1.4
+  - @aws-blocks/bb-lambda-compute@0.2.2
+  - @aws-blocks/bb-logger@0.1.5
+  - @aws-blocks/bb-metrics@0.1.5
+  - @aws-blocks/bb-realtime@0.1.5
+  - @aws-blocks/bb-tracer@0.1.7
+
 ## 0.3.1
 
 ### Patch Changes
