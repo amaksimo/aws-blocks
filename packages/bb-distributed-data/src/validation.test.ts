@@ -3,6 +3,7 @@
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import { isWireSafeError } from '@aws-blocks/core';
 import { validateStatement, classifyStatement, TransactionTracker, validateMigrations, stripLiteralsAndComments } from './validation.js';
 
 describe('validateStatement', () => {
@@ -55,6 +56,14 @@ describe('validateStatement', () => {
       assert.throws(() => validateStatement(sql), { name: 'DsqlValidationError' });
     });
   }
+
+  it('brands rejections so the error name crosses the RPC wire', () => {
+    assert.throws(() => validateStatement('TRUNCATE TABLE users'), (e: Error) => {
+      assert.equal(e.name, 'DsqlValidationError');
+      assert.ok(isWireSafeError(e));
+      return true;
+    });
+  });
 
   it('allows supported ALTER TABLE forms that contain DROP', () => {
     assert.doesNotThrow(() => validateStatement('ALTER TABLE t DROP COLUMN c'));
