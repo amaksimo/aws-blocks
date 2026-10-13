@@ -57,6 +57,15 @@ export const api = new ApiNamespace(scope, 'api', (context) => ({
 
 The local mock applies no auth either, so an ungated method passes every local check and still ships callable by anyone. See your auth block's README (e.g. `@aws-blocks/bb-auth-cognito`) for `requireAuth` / `requireRole`.
 
+#### What the RPC endpoint can reach
+
+The RPC endpoint dispatches `<exportName>.<method>` against your backend module's exports. Export **`ApiNamespace` values** for anything the client should call — and keep Building Block instances unexported (or reach them only through a gated method):
+
+- An exported **Building Block instance** (e.g. `export const todos = new DistributedTable(scope, 'todos')`) is **not** callable over RPC — calling `todos.put` returns *method not found*. Its data plane is only reachable through the `ApiNamespace` methods you write, where your `requireAuth` gates run.
+- **`_`-prefixed exports** are private: they get no client proxy and are not dispatched.
+- **`secret()` / `config()` markers** are deferred values, not APIs: they get no client proxy and are not dispatched.
+- Only **callable methods** are dispatched; members inherited from `Object.prototype` (`toString`, `constructor`, `hasOwnProperty`, …) are never reachable.
+
 #### Calling the API over HTTP (JSON-RPC 2.0)
 
 The typed `import { api } from 'aws-blocks'` client is the normal path. The HTTP form below is for manual verification (curl/Postman) and non-JS clients.
@@ -75,6 +84,18 @@ The body is JSON-RPC 2.0:
 - `method` is `<namespace>.<methodName>`, where `<namespace>` is the **export variable name** from `aws-blocks/index.ts` (e.g., `export const api = ...` → `api`).
 - `params` is a POSITIONAL array of the method's arguments. A named object also works (its values are used in order).
 - Errors come back as HTTP `200` with an `error` object in the body (per JSON-RPC), not as a non-2xx status.
+
+Error responses use these JSON-RPC codes:
+
+| Code | Meaning | When Blocks uses it |
+|------|---------|---------------------|
+| `-32700` | Parse error | Request body is not valid JSON. |
+| `-32600` | Invalid Request | Body is not a valid Blocks JSON-RPC request, such as missing `jsonrpc: "2.0"` or a `method` that is not `namespace.method`. |
+| `-32601` | Method not found | The requested namespace or method is not exported by the backend. |
+| `-32602` | Invalid params | Reserved for JSON-RPC parameter validation failures. Application-level validation should throw an `ApiError` with the appropriate HTTP status instead. |
+| `-32603` | Internal error | Reserved for generic JSON-RPC internal errors. Unhandled application errors currently use code `500`. |
+
+Errors thrown with `ApiError` use the positive HTTP status as the JSON-RPC `error.code` (for example, `401`, `404`, or `409`) and include `error.data.name` when an error name is available. The typed client converts JSON-RPC errors back into `ApiError`.
 
 Working example:
 
@@ -313,6 +334,19 @@ new Hosting(stack, 'Web', {
 
 The `framework` option selects the frontend type: `'spa' | 'static' | 'nextjs'`. When omitted, the framework is auto-detected by reading your app's OWN `package.json` (not `node_modules`): a `next` dependency → `nextjs`; otherwise `spa`; and `static` when there is no `package.json`. Set `framework: 'spa'` explicitly to override auto-detection — e.g. when a stray `next` dependency would otherwise trigger an unwanted Next.js/OpenNext build. Full reference lives in the source JSDoc.
 
+Old builds are retained for rollback and expired by an S3 lifecycle rule after `buildRetentionDays` (default **30**). The build currently being served is never expired regardless of deploy cadence — only superseded builds are cleaned up. Only builds superseded by a normal `Update` cutover are auto-tagged (and thus auto-expired): pre-existing/orphaned builds and aborted or rolled-back deploys are never tagged and need manual cleanup (e.g. an S3 inventory / Batch Operations sweep). Raise the window with `buildRetentionDays` (it must be ≥ `skewProtection.maxAge` in days):
+
+```typescript
+new Hosting(stack, 'Web', {
+  root: join(__dirname, '..'),
+  api: blocksStack,
+  buildRetentionDays: 90,
+});
+```
+
+Core's top-level `buildRetentionDays` maps to the L3 construct's `storage.buildRetentionDays`.
+
+
 ## Building Blocks
 
 Import Building Blocks from their specific packages (or from the `@aws-blocks/blocks` umbrella):
@@ -345,6 +379,19 @@ const posts = await withAuth(() => api.listMyPosts(), request.headers.get('cooki
 
 In local dev mode, Building Blocks use mock implementations. No AWS resources needed.
 
+The dev server (`npm run dev`) listens on **`127.0.0.1` (loopback) only**, so nothing on your network can reach it. It serves your whole API against the local mock data, and local auth authenticates nothing. In a container or a remote devbox where you control who can reach the port, opt into a wider interface:
+
+```bash
+BLOCKS_DEV_HOST=0.0.0.0 npm run dev   # prints a warning: anyone who can reach this interface can call your API
+```
+
+You can also pass `host` to `startDevServer({ host })` in `aws-blocks/scripts/server.ts`. The local realtime WebSocket (`/realtime`) accepts upgrades only from loopback origins, or from the host you opted into:
+
+- With a **wildcard** (`BLOCKS_DEV_HOST=0.0.0.0`), open the app **by IP address** (e.g. `http://192.168.1.10:3000`). Same-origin pages reached by IP are accepted; DNS names are not, because a same-origin check against a name can be defeated by DNS rebinding.
+- To open it by **hostname** (e.g. `http://mybox.example.com:3000`), set `BLOCKS_DEV_HOST=mybox.example.com` instead.
+
+Only server-side `Realtime.publish()` can publish. Clients can subscribe, but not publish, exactly as in a deployed app.
+
 ## CORS Configuration
 
 By default, the Lambda handler does **not** set any `Access-Control-Allow-Origin` header. CORS behavior is controlled entirely by the `CORS_ALLOWED_ORIGINS` environment variable.
@@ -354,7 +401,7 @@ By default, the Lambda handler does **not** set any `Access-Control-Allow-Origin
 If you use the `Hosting` construct with your API, CORS is handled automatically:
 
 - **Same-origin requests** (frontend fetches through the CloudFront proxy at `/aws-blocks/api`) work without CORS headers since the browser treats them as same-origin.
-- **Cross-origin requests** (e.g. direct API Gateway calls) are also covered: when you pass a `BlocksStack` or `BlocksBackend` as the `api` prop, the Hosting construct automatically adds the CloudFront distribution's domain to `CORS_ALLOWED_ORIGINS` on the backend Lambda. You do **not** need to configure CORS manually.
+- **Cross-origin requests** (e.g. direct API Gateway calls) are also covered: when you pass a `BlocksStack` or `BlocksBackend` as the `api` prop, the Hosting construct registers the CloudFront distribution's domain (or your custom domain) as `CORS_HOSTING_ORIGINS` in the backend's S3 config, where it is compiled separately as an escaped literal origin. Your `CORS_ALLOWED_ORIGINS` is left untouched. You do **not** need to configure CORS manually.
 
 In sandbox mode, the localhost pattern is also preserved so your local dev frontend still works.
 
@@ -388,5 +435,7 @@ Each entry is treated as a **regex pattern** (anchored with `^` and `$`). Exampl
 | `.*` | All origins (escape hatch — use with caution) |
 
 Multiple patterns are comma-separated. If a pattern is invalid regex, it falls back to literal string match.
+
+> **Escape the dots.** Because each entry is a regex, an unescaped `.` matches *any* character — so `https://app.example.com` also matches unrelated hosts like `https://appXexample.com`. Always escape literal dots: write `https://app\\.example\\.com`, not `https://app.example.com`. Each entry is compiled as `^(?:<entry>)$`, so it must match the whole origin: `^https://app\\.example\\.com` (or just `https://app\\.example\\.com`) matches that exact origin, not `https://app.example.com.extra`. Because the anchors wrap the whole expression, every branch of a top-level `|` alternation is anchored too. Prefer separate comma-separated entries over one `|`-joined entry for readability. The CloudFront origin the `Hosting` construct injects for you is always escaped and anchored automatically.
 
 If an origin doesn't match any pattern, the handler omits the `Access-Control-Allow-Origin` header (browser blocks the response) and logs a `[CORS]` warning to CloudWatch.

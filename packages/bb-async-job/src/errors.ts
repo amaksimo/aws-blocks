@@ -1,6 +1,8 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+import { brandBlocksError } from '@aws-blocks/core';
+
 import type { BatchSubmitResult } from './types.js';
 
 /**
@@ -23,14 +25,16 @@ export const AsyncJobErrors = {
 	StatusNotTracked: 'StatusNotTrackedException',
 	/** Thrown at synth time when an `AsyncJobOptions` value is outside its supported range. */
 	InvalidOption: 'InvalidOptionException',
+	/** Thrown at synth time when the resolved compute is not a supported type (only Lambda today). */
+	UnsupportedCompute: 'UnsupportedComputeException',
 } as const;
 
-/** Build a typed `AsyncJob` error whose `name` is one of {@link AsyncJobErrors}. */
-export function blocksError(name: string, message: string): Error {
-	const err = new Error(`${name}: ${message}`);
-	err.name = name;
-	return err;
-}
+/**
+ * Build a typed error whose `name` is one of {@link AsyncJobErrors}. Re-exported
+ * from core so every block shares one implementation (single source of the
+ * name-as-contract rule) rather than a per-package copy.
+ */
+export { blocksError } from '@aws-blocks/core';
 
 /**
  * Thrown by `submitBatch` when one or more messages fail to enqueue (AWS only).
@@ -50,5 +54,6 @@ export class BatchSubmitFailedError extends Error {
 		super(`${AsyncJobErrors.BatchSubmitFailed}: ${message}`);
 		this.jobIds = jobIds;
 		this.failed = failed;
+		brandBlocksError(this);
 	}
 }

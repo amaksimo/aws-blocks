@@ -8,6 +8,7 @@
  * @see https://docs.aws.amazon.com/aurora-dsql/latest/userguide/working-with-postgresql-compatibility.html
  */
 
+import { brandBlocksError } from '@aws-blocks/core';
 import { TRANSACTION_ROW_LIMIT } from './errors.js';
 import { splitStatements, DOLLAR_QUOTE_TAG_RE } from '@aws-blocks/data-common';
 import { runDsqlLint } from './dsql-lint.js';
@@ -64,13 +65,13 @@ export function stripLiteralsAndComments(sql: string): string {
 export function validateStatement(sql: string): void {
   const file = runDsqlLint(sql).files[0];
   if (file.error) {
-    throw Object.assign(new Error(`dsql-lint failed: ${file.error}`), { name: 'DsqlValidationError' });
+    throw brandBlocksError(Object.assign(new Error(`dsql-lint failed: ${file.error}`), { name: 'DsqlValidationError' }));
   }
   if (file.diagnostics.length > 0) {
     const message = file.diagnostics
       .map(diagnostic => `${diagnostic.message} ${diagnostic.suggestion}`)
       .join('\n');
-    throw Object.assign(new Error(message), { name: 'DsqlValidationError' });
+    throw brandBlocksError(Object.assign(new Error(message), { name: 'DsqlValidationError' }));
   }
 }
 

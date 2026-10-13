@@ -41,13 +41,21 @@ bb-distributed-data (this package)
 - Password callback generates fresh tokens per connection (60-min expiry)
 - Translates pg error codes to `DistributedDatabaseErrors` names
 - Pool handles reconnection transparently when connections expire
+- Reports the block's BB user-agent chain as the Postgres `application_name`
+  (`Scope.formatUserAgentString()`, e.g.
+  `aws-blocks/<core> bb/DistributedDatabase/<version>`). Supplied as pg's
+  `fallback_application_name`, so a caller's `PGAPPNAME` wins. Capped at the
+  Postgres 63-byte limit, dropping whole parent entries rather than truncating
+  mid-token. Attribution only. DSQL applies the value
+  (`current_setting('application_name')` returns it) but does not support
+  `pg_stat_activity`.
 
 ### DsqlMockEngine (Local Dev)
 
 - PGlite wrapped with a validation layer
 - `validateStatement()` runs `dsql-lint` before execution
 - `TransactionTracker` enforces DDL/DML separation and 3,000-row limit
-- `simulateConflict()` test helper for OCC testing
+- `simulateConflict()` test helper for OCC unit testing (mock-only hook, absent from the deployed AWS surface). The `40001`→409 serialization-conflict mapping is covered by translator/engine **unit tests** (mirroring `bb-data`), not an over-the-wire e2e test: `simulateConflict()` is a mock-only trigger with no counterpart on the deployed runtime, and there is no deterministic way to raise a genuine `40001` conflict over the JSON-RPC wire in local e2e. A duplicate-key `23505`→409 `UniqueConstraintViolation` conflict (not retriable) is different: the DSQL mock enforces the primary-key constraint, so it **is** deterministically inducible over the wire and is additionally covered by an over-the-wire e2e test (`test-apps/comprehensive/test/dsql.test.ts`), not a mock-only hook.
 - Error translation matches production behavior
 
 ## Validation Layer
@@ -109,7 +117,7 @@ Happens in the engine layer (same pattern as bb-data engines):
 | pg error code | DistributedDatabaseErrors name |
 |---------------|------------------------|
 | `40001` | `SerializationFailure` |
-| `23505` | `UniqueConstraintViolation` |
+| `23505` | `UniqueConstraintViolation` (→ `ApiError` 409, not retriable) |
 | `08xxx` | `ConnectionFailed` |
 | (other) | `QueryFailed` |
 
@@ -158,6 +166,7 @@ The `DistributedDatabase` class does not wrap errors — engines handle translat
 | No 60-min connection timeout | Dev sessions are short | Document only |
 | No 10 MiB / 5-min tx limits | Impractical to measure locally | Document only |
 | CREATE INDEX ASYNC is synchronous | Index immediately available locally | Log warning |
+| `application_name` on the pg connection | Not reported by the mock engine; the AWS `DsqlEngine` reports the BB user-agent chain (see above) | Intentional. Attribution-only. |
 
 ## Connection Management
 

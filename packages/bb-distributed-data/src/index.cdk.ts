@@ -7,11 +7,12 @@
  * Optionally runs migrations via a CustomResource Lambda.
  */
 
-import { Scope, DEFAULT_NODE_RUNTIME, synthGuard, blocksNodejsBundling, registerConfig } from '@aws-blocks/core/cdk';
+import { BuildingBlockScope, DEFAULT_NODE_RUNTIME, synthGuard, blocksNodejsBundling, registerConfig } from '@aws-blocks/core/cdk';
 import type { ScopeParent } from '@aws-blocks/core';
 import * as cdk from 'aws-cdk-lib';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as lambda from 'aws-cdk-lib/aws-lambda-nodejs';
+import { LogGroup } from 'aws-cdk-lib/aws-logs';
 import * as cr from 'aws-cdk-lib/custom-resources';
 import { createHash } from 'node:crypto';
 import { readdirSync, readFileSync } from 'node:fs';
@@ -20,9 +21,9 @@ import type { DistributedDatabaseOptions } from './types.js';
 import { LAMBDA_MIGRATIONS_DIR, MIGRATION_LAMBDA_TIMEOUT_MINUTES, ENV_SANITIZE, sanitizeDbRoleName } from './constants.js';
 import { validateMigrations } from './validation.js';
 
-export class DistributedDatabase extends Scope {
+export class DistributedDatabase extends BuildingBlockScope {
   constructor(scope: ScopeParent, id: string, options?: DistributedDatabaseOptions) {
-    super(id, { parent: scope });
+    super(id, { parent: scope, vpc: { requiresEgress: true } });
 
     const stack = cdk.Stack.of(this);
     const envName = this.fullId.replace(ENV_SANITIZE, '_');
@@ -83,6 +84,12 @@ export class DistributedDatabase extends Scope {
       handler: 'handler',
       runtime: DEFAULT_NODE_RUNTIME,
       timeout: cdk.Duration.minutes(MIGRATION_LAMBDA_TIMEOUT_MINUTES),
+      // Own the migration Lambda's log group so its retention follows the
+      // stack-wide default instead of AWS's infinite retention.
+      logGroup: new LogGroup(stack, `${this.fullId}DsqlMigrationLogs`, {
+        retention: this.defaults.logRetention,
+        removalPolicy: cdk.RemovalPolicy.DESTROY,
+      }),
       environment: {
         DSQL_ENDPOINT: endpoint,
         DSQL_REGION: region,
@@ -111,9 +118,15 @@ export class DistributedDatabase extends Scope {
       onEventHandler: migrationFn,
     });
 
+    // `appRoleArn` is a property, not just a Lambda env var, because CloudFormation only
+    // re-invokes a CustomResource when its properties change. Replacing the app's IAM role
+    // changes this ARN, which is what re-runs provisionAppRole() and re-issues the DSQL
+    // `AWS IAM GRANT`. Without it, a role replacement leaves the grant on the old, deleted
+    // ARN and every query fails with 28000 (invalid_authorization_specification). The ARN is
+    // a token, so this only differs when the role is genuinely replaced — not on every deploy.
     const migrationCR = new cdk.CustomResource(stack, `${this.fullId}DsqlMigrationCR`, {
       serviceToken: provider.serviceToken,
-      properties: { migrationsHash, dbRole },
+      properties: { migrationsHash, dbRole, appRoleArn },
     });
 
     // Ensure migrations run after cluster is created

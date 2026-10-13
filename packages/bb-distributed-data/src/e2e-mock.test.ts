@@ -10,7 +10,7 @@ import assert from 'node:assert/strict';
 import { rmSync } from 'node:fs';
 import { DatabaseBase, sql, type Transaction } from '@aws-blocks/data-common';
 import { DsqlMockEngine } from './engines/dsql-mock-engine.js';
-import { DistributedDatabaseErrors } from './errors.js';
+import { DistributedDatabaseErrors, DSQL_PERMISSION_ERROR_NAME } from './errors.js';
 import { runMigrations } from './migrations.js';
 import { transactionWithRetry } from './transaction.js';
 import type { TransactionOptions } from './types.js';
@@ -94,7 +94,7 @@ describe('DistributedDatabase E2E (mock)', () => {
   });
 
   it('accepts FK syntax before the runtime DDL permission check', async () => {
-    await assert.rejects(() => db.execute(sql`CREATE TABLE bad (id TEXT REFERENCES users(id))`), { name: 'DsqlPermissionError' });
+    await assert.rejects(() => db.execute(sql`CREATE TABLE bad (id TEXT REFERENCES users(id))`), { name: DSQL_PERMISSION_ERROR_NAME });
   });
 
   it('enforces foreign keys', async () => {
@@ -110,7 +110,7 @@ describe('DistributedDatabase E2E (mock)', () => {
     await assert.rejects(() => db.transaction(async (tx) => {
       await tx.execute(sql`INSERT INTO users (id, name) VALUES (${'x'}, ${'X'})`);
       await tx.execute(sql`CREATE TABLE fail (id TEXT)`);
-    }), { name: 'DsqlPermissionError' });
+    }), { name: DSQL_PERMISSION_ERROR_NAME });
   });
 
   it('unique constraint violation', async () => {
