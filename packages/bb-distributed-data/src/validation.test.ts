@@ -95,7 +95,7 @@ describe('validateStatement', () => {
   it('uses dsql-lint diagnostics and suggestions', () => {
     assert.throws(
       () => validateStatement('CREATE TABLE copy AS SELECT 1 AS id'),
-      /Create the table with explicit column definitions/,
+      /CREATE TABLE AS .* is not supported in DSQL\. Create the table with explicit column definitions/,
     );
   });
 
@@ -529,7 +529,7 @@ describe('validateStatement — index key sort order', () => {
   it('rejects DESC on an index key', () => {
     assert.throws(
       () => validateStatement('CREATE INDEX idx ON persons (user_id, last_encounter_at DESC)'),
-      { name: 'DsqlValidationError' },
+      { name: 'DsqlValidationError', message: /sort direction DESC is not supported/ },
     );
   });
 
@@ -543,7 +543,7 @@ describe('validateStatement — index key sort order', () => {
   it('rejects an explicit ASC on an index key', () => {
     assert.throws(
       () => validateStatement('CREATE INDEX idx ON t (col ASC)'),
-      { name: 'DsqlValidationError' },
+      { name: 'DsqlValidationError', message: /sort direction ASC is not supported/ },
     );
   });
 
