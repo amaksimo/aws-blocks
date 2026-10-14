@@ -12,7 +12,13 @@ import {
 	type ScopeOptions,
 	type ScopeParent,
 } from '../common/index.js';
-import { assertCdkConditionActive, BlocksBackend, setupBlocksInfra } from './blocks-backend.js';
+import {
+	assertCdkConditionActive,
+	BlocksBackend,
+	buildSharedGateway,
+	requireSharedGateway,
+	setupBlocksInfra,
+} from './blocks-backend.js';
 import { type BlocksDefaults, BlocksPresets } from './blocks-defaults.js';
 import type { Compute } from './compute/compute.js';
 import { getComputes } from './compute/compute-registry.js';
@@ -20,6 +26,7 @@ import type { DefaultComputeFactory, LambdaShapedCompute } from './compute/defau
 import { finalizeConfigRegistry } from './config-registry.js';
 import { finalizeDashboards } from './dashboard-registry.js';
 import { BLOCKS_BACKEND_ROOT, findBackendRoot } from './root-registry.js';
+import type { SharedGateway } from './shared-gateway.js';
 import { addBlocksStackMetadata } from './stack-metadata.js';
 import { finalizeTracing } from './tracer-registry.js';
 import { anyRequirementNeedsVpc, finalizeVpc, getOrCreateVpc, initializeVpc } from './vpc.js';
@@ -80,16 +87,18 @@ export class BlocksStack extends cdk.Stack implements BaseBlocksStack {
 	public readonly executionRole: cdk.aws_iam.IRole;
 	/** Infrastructure defaults for Building Blocks created under this stack. */
 	public readonly defaults: BlocksDefaults;
-	/** The default compute (owns the Lambda function + API Gateway); set in `create()`. @internal */
+	/** The default compute (owns the Lambda function); set in `create()`. @internal */
 	_defaultCompute?: Compute;
+	/** The single shared REST API gateway fronting the default compute; built in `create()`. @internal */
+	_sharedGateway?: SharedGateway;
 
-	/** The default compute's API Gateway REST API. To be removed once consumers move to the multi-compute model. */
+	/** The stack's shared REST API gateway. To be removed once consumers move to the multi-compute model. */
 	get gateway(): cdk.aws_apigateway.RestApi {
-		return this.requireDefaultCompute().apiGateway;
+		return this.requireSharedGateway().restApi;
 	}
-	/** The default compute's RPC endpoint URL. To be removed once consumers move to the multi-compute model. */
+	/** The shared gateway's RPC endpoint URL. To be removed once consumers move to the multi-compute model. */
 	get apiUrl(): string {
-		return this.requireDefaultCompute().apiUrl;
+		return this.requireSharedGateway().apiUrl;
 	}
 	/** The default compute's handler CloudWatch log group. Its retention comes from
 	 * the compute's `logRetention` (falling back to `defaults.logRetention`); the
@@ -105,6 +114,10 @@ export class BlocksStack extends cdk.Stack implements BaseBlocksStack {
 			);
 		}
 		return this._defaultCompute as LambdaShapedCompute;
+	}
+
+	private requireSharedGateway(): SharedGateway {
+		return requireSharedGateway(this, 'BlocksStack');
 	}
 
 	private _vpcOptions?: BlocksVpcOptions;
@@ -145,10 +158,10 @@ export class BlocksStack extends cdk.Stack implements BaseBlocksStack {
 		const actualScope = pipelineScope || scope;
 
 		const stack = new BlocksStack(actualScope, id, props);
-		// Create the default compute before importing the backend: it OWNS the
-		// Lambda function + API Gateway (which back .gateway/.apiUrl), and
-		// a block reading `this.compute` in its constructor (during that import)
-		// must resolve to it. The factory is supplied by the umbrella
+		// Create the default compute before importing the backend: it owns the
+		// Lambda function (the shared gateway's target), and a block reading
+		// `this.compute` in its constructor (during that import) must resolve to
+		// it. The factory is supplied by the umbrella
 		// @aws-blocks/blocks (which injects LambdaCompute) via props, so core never
 		// imports the concrete compute class.
 		stack._defaultCompute = props.defaultComputeFactory(stack);
@@ -167,6 +180,10 @@ export class BlocksStack extends cdk.Stack implements BaseBlocksStack {
 				);
 			}
 		}
+		// Build the single shared REST API gateway now that the backend module has
+		// imported and every compute exists (see buildSharedGateway).
+		buildSharedGateway(stack);
+
 		// Finalize BB config → S3 (after all BBs have registered their config)
 		finalizeConfigRegistry(stack, stack.executionRole, getComputes(stack));
 
