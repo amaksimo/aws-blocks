@@ -58,6 +58,10 @@
       "import": "./dist/server.js",
       "default": "./dist/server.js"
     },
+    "./theme": {
+      "types": "./dist/theme.d.ts",
+      "default": "./dist/theme.js"
+    },
     "./ui": {
       "types": "./dist/ui.d.ts",
       "default": "./dist/ui.js"
