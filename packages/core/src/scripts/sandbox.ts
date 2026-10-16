@@ -398,9 +398,10 @@ export async function emptyBucket(s3: S3Client, bucket: string): Promise<void> {
  * a partial/aborted deploy), so the versioned bucket blocks the delete and the
  * stack (and its IAM roles) leak. Emptying out-of-band before the retry lets
  * the delete complete. Best-effort: any per-stack/per-bucket error is logged
- * and skipped so teardown still proceeds.
+ * and skipped so teardown still proceeds. Exported so the production destroy
+ * path ({@link ./destroy.ts}) reuses the same bucket-emptying step.
  */
-async function emptySandboxBuckets(stackNames: string[]): Promise<void> {
+export async function emptySandboxBuckets(stackNames: string[]): Promise<void> {
 	try {
 		const { CloudFormationClient } = await import('@aws-sdk/client-cloudformation');
 		const { S3Client } = await import('@aws-sdk/client-s3');
@@ -466,10 +467,12 @@ export interface DestroyRetryDeps {
 	listStackNames: () => string[];
 	/** Empty the given stacks' versioned S3 buckets. */
 	emptyBuckets: (stackNames: string[]) => Promise<void>;
-	/** Sleep (VPC-ENI detach window). */
+	/** Backoff between retries (VPC-ENI detach, bucket-block clearing, DeleteRestApi 429 throttle). */
 	sleep: (ms: number) => Promise<void>;
 	/** Backoff between retries. Default: 1min, then 2min. */
 	retryDelays?: number[];
+	/** What the resource is, for the success log. Default: 'Sandbox' (production passes 'Production stack'). */
+	successLabel?: string;
 }
 
 /**
@@ -479,15 +482,19 @@ export interface DestroyRetryDeps {
  * failed, so the bucket blocks the delete and the stack (+ its IAM roles) leaks;
  * we empty them out-of-band — and (2) VPC ENIs that take 60-120s to detach (the
  * backoff). Stack names are resolved once and reused (topology is stable across
- * attempts). Factored out with injectable deps so this behavior is unit-testable.
+ * attempts). Deterministic auth/account failures never reach here: both callers
+ * run an {@link assertAwsCredentials} pre-flight first, so this loop only ever
+ * retries a transient teardown blocker. Factored out with injectable deps so
+ * this behavior is unit-testable.
  */
 export async function runDestroyWithRetries(deps: DestroyRetryDeps): Promise<void> {
 	const retryDelays = deps.retryDelays ?? [60_000, 120_000];
+	const label = deps.successLabel ?? 'Sandbox';
 	let stackNames: string[] | undefined;
 	for (let attempt = 0; ; attempt++) {
 		try {
 			deps.runDestroy();
-			console.log(attempt === 0 ? '\n✅ Sandbox destroyed!' : '\n✅ Sandbox destroyed on retry!');
+			console.log(attempt === 0 ? `\n✅ ${label} destroyed!` : `\n✅ ${label} destroyed on retry!`);
 			return;
 		} catch (error) {
 			if (attempt < retryDelays.length) {
@@ -510,6 +517,12 @@ export async function runDestroyWithRetries(deps: DestroyRetryDeps): Promise<voi
 export async function destroySandbox(backendPath: string) {
   return trackCommand('sandbox:destroy', async () => {
     console.log("🗑️  Destroying sandbox...");
+
+    // Fail fast on a missing/expired credential BEFORE the retry loop: a
+    // credential error is deterministic and retrying only burns the backoff.
+    // Mirrors the `sandbox` deploy pre-flight; the retry is for transient
+    // teardown blockers, not auth.
+    await assertAwsCredentials({ command: 'sandbox:destroy', projectRoot: process.cwd() });
 
     // Load .env.local so CDK synth can read project refs and other config.
     try { loadEnvFile('.env.local'); } catch (e: any) {
